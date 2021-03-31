@@ -56,8 +56,7 @@ int tpool_future_destroy(struct __tpool_future *future)
 {
     if (future) {
         pthread_mutex_lock(&future->mutex);
-        if (future->flag & __FUTURE_FINISHED ||
-            future->flag & __FUTURE_CANCELLED) {
+        if (future->flag & (__FUTURE_FINISHED | __FUTURE_CANCELLED)) { // modi // del(?))
             pthread_mutex_unlock(&future->mutex);
             pthread_mutex_destroy(&future->mutex);
             pthread_cond_destroy(&future->cond_finished);
@@ -88,7 +87,7 @@ void *tpool_future_get(struct __tpool_future *future, unsigned int seconds)
                 return NULL;
             }
         } else
-            FFF;
+            pthread_cond_wait(&future->cond_finished, &future->mutex);
     }
 
     pthread_mutex_unlock(&future->mutex);
@@ -130,7 +129,7 @@ static void jobqueue_destroy(jobqueue_t *jobqueue)
     free(jobqueue);
 }
 
-static void __jobqueue_fetch_cleanup(void *arg)
+static void __jobqueue_fetch_cleanup(void *arg) // need to be locked
 {
     pthread_mutex_t *mutex = (pthread_mutex_t *) arg;
     pthread_mutex_unlock(mutex);
@@ -149,7 +148,9 @@ static void *jobqueue_fetch(void *queue)
         pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, &old_state);
         pthread_testcancel();
 
-        GGG;
+        while (!jobqueue->tail) 
+            pthread_cond_wait(&jobqueue->cond_nonempty, &jobqueue->rwlock);
+
         pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &old_state);
         if (jobqueue->head == jobqueue->tail) {
             task = jobqueue->tail;
@@ -165,7 +166,7 @@ static void *jobqueue_fetch(void *queue)
         }
         pthread_mutex_unlock(&jobqueue->rwlock);
 
-        if (task->func) {
+        if (task->func) { // reduce branch
             pthread_mutex_lock(&task->future->mutex);
             if (task->future->flag & __FUTURE_CANCELLED) {
                 pthread_mutex_unlock(&task->future->mutex);
@@ -184,9 +185,9 @@ static void *jobqueue_fetch(void *queue)
                 pthread_cond_destroy(&task->future->cond_finished);
                 free(task->future);
             } else {
-                task->future->flag |= KKK;
+                task->future->flag |=  __FUTURE_FINISHED;
                 task->future->result = ret_value;
-                LLL;
+                pthread_cond_broadcast(&task->future->cond_finished);
                 pthread_mutex_unlock(&task->future->mutex);
             }
             free(task);
@@ -252,7 +253,7 @@ struct __tpool_future *tpool_apply(struct __threadpool *pool,
             jobqueue->head = new_head;
         } else {
             jobqueue->head = jobqueue->tail = new_head;
-            HHH;
+            pthread_cond_broadcast(&jobqueue->cond_nonempty);
         }
         pthread_mutex_unlock(&jobqueue->rwlock);
     } else if (new_head) {
@@ -270,6 +271,9 @@ int tpool_join(struct __threadpool *pool)
     size_t num_threads = pool->count;
     for (int i = 0; i < num_threads; i++)
         tpool_apply(pool, NULL, NULL);
+    // cancelation
+    for (int i = 0; i < num_threads; i++) 
+        pthread_cancel(pool->workers[i]);
     for (int i = 0; i < num_threads; i++)
         pthread_join(pool->workers[i], NULL);
     free(pool->workers);

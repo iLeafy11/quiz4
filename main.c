@@ -24,7 +24,7 @@ int main()
 {
     int bbp_args[PRECISION + 1]; // mod
     double bbp_sum = 0; // mod
-    tpool_t pool = tpool_create(30);
+    tpool_t pool = tpool_create(4);
     tpool_future_t futures[PRECISION + 1];
 
     for (int i = 0; i <= PRECISION; i++) {

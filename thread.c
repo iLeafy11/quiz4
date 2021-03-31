@@ -201,7 +201,8 @@ static void *jobqueue_fetch(void *queue)
     }
 
     pthread_cleanup_pop(0);
-    pthread_exit(NULL);
+    return NULL;
+    // pthread_exit(NULL);
 }
 
 struct __threadpool *tpool_create(size_t count)

@@ -266,8 +266,8 @@ struct __tpool_future *tpool_apply(struct __threadpool *pool,
         free(new_head);
         return NULL;
     } else if (future) {
-        // tpool_future_destroy(future);
-        free(future);
+        tpool_future_destroy(future);
+        // free(future);
         return NULL;
     }
     return future;

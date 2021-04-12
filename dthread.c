@@ -135,6 +135,7 @@ static void jobqueue_destroy(jobqueue_t *jobqueue)
         }
         free(target);
     }
+    free(jobqueue->head);
     pthread_mutex_destroy(&jobqueue->rwlock);
     pthread_cond_destroy(&jobqueue->cond_nonempty);
     free(jobqueue);
@@ -168,9 +169,9 @@ static void *jobqueue_fetch(void *queue)
         pthread_mutex_lock(&jobqueue->rwlock);
         pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, &old_state);
         pthread_testcancel();
-        while (list_empty(jobqueue->head)) { // TODO: what if using jobqueue->size to replace isEmpty() ?
+        while (list_empty(jobqueue->head)) { /* TODO: what if using jobqueue->size to replace isEmpty() ? */
             pthread_cond_wait(&jobqueue->cond_nonempty, &jobqueue->rwlock);
-            printf("wait\n");
+            // printf("wait\n");
         }
         pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &old_state);
 

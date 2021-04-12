@@ -1,8 +1,10 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 
 #include "thread.h"
+#include "dthread.h"
 
 #define PRECISION 100 /* upper bound in BPP sum */
 
@@ -18,6 +20,17 @@ static void *bbp(void *arg) // mod
     return (void *) product;
 }
 
+static void *test(void *arg)
+{
+    sleep(10);
+    int i = *(int *) arg;
+    double *product = malloc(sizeof(double));
+    if (product) {
+        *product = (double) i;
+    }
+    return (void *) product;
+}
+
 #include "leibniz.h"
 
 int main()
@@ -30,11 +43,13 @@ int main()
     for (int i = 0; i <= PRECISION; i++) {
         bbp_args[i] = i; // mod
         futures[i] = tpool_apply(pool, bbp, (void *) &bbp_args[i]); // bbp
+        // futures[i] = tpool_apply(pool, test, (void *) &bbp_args[i]); // test
     }
 
     for (int i = 0; i <= PRECISION; i++) {
         double *result = tpool_future_get(futures[i], 0 /* blocking wait */);
         bbp_sum += *result; // mod
+        // printf ("%.15f\n", *result); // test
         tpool_future_destroy(futures[i]);
         free(result);
     }

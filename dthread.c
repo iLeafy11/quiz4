@@ -1,8 +1,11 @@
-#include <errno.h>
-#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
+#include <errno.h>
+#include <pthread.h>
 #include <time.h>
+
+#include "dthread.h"
 
 enum __future_flags {
     __FUTURE_RUNNING = 01,
@@ -16,11 +19,12 @@ typedef struct __threadtask {
     void *(*func)(void *);
     void *arg;
     struct __tpool_future *future;
-    struct __threadtask *next;
+    struct list_head list; // new doubly linked list structure
 } threadtask_t;
 
 typedef struct __jobqueue {
-    threadtask_t *head, *tail;
+    struct list_head *head;
+    size_t size;
     pthread_cond_t cond_nonempty;
     pthread_mutex_t rwlock;
 } jobqueue_t;
@@ -45,10 +49,7 @@ static struct __tpool_future *tpool_future_create(void)
         future->flag = 0;
         future->result = NULL;
         pthread_mutex_init(&future->mutex, NULL);
-        pthread_condattr_t attr;
-        pthread_condattr_init(&attr);
-        pthread_cond_init(&future->cond_finished, &attr);
-        pthread_condattr_destroy(&attr);
+        pthread_cond_init(&future->cond_finished, NULL);
     }
     return future;
 }
@@ -79,14 +80,12 @@ void *tpool_future_get(struct __tpool_future *future, unsigned int seconds)
         if (seconds) {
             struct timespec expire_time;
             clock_gettime(CLOCK_MONOTONIC, &expire_time);
-            // clock_gettime(CLOCK_REALTIME, &expire_time);
             expire_time.tv_sec += seconds;
             int status = pthread_cond_timedwait(&future->cond_finished,
                                                 &future->mutex, &expire_time);
             if (status == ETIMEDOUT) {
                 future->flag |= __FUTURE_TIMEOUT;
                 pthread_mutex_unlock(&future->mutex);
-                printf("TIMEDOUT!\n");
                 return NULL;
             }
         } else
@@ -102,7 +101,16 @@ static jobqueue_t *jobqueue_create(void)
 {
     jobqueue_t *jobqueue = malloc(sizeof(jobqueue_t));
     if (jobqueue) {
-        jobqueue->head = jobqueue->tail = NULL;
+        struct list_head *q = malloc(sizeof(struct list_head));
+        INIT_LIST_HEAD(q);
+        /*
+        if (list_empty(q)) {
+            printf("init success!\n");
+            printf("init address: %p\n", q);
+        }
+            */
+        jobqueue->head = q;
+        jobqueue->size = 0;
         pthread_cond_init(&jobqueue->cond_nonempty, NULL);
         pthread_mutex_init(&jobqueue->rwlock, NULL);
     }
@@ -111,23 +119,22 @@ static jobqueue_t *jobqueue_create(void)
 
 static void jobqueue_destroy(jobqueue_t *jobqueue)
 {
-    threadtask_t *tmp = jobqueue->head;
-    while (tmp) {
-        jobqueue->head = jobqueue->head->next;
-        pthread_mutex_lock(&tmp->future->mutex);
-        if (tmp->future->flag & __FUTURE_DESTROYED) {
-            pthread_mutex_unlock(&tmp->future->mutex);
-            pthread_mutex_destroy(&tmp->future->mutex);
-            pthread_cond_destroy(&tmp->future->cond_finished);
-            free(tmp->future);
+    threadtask_t *target;
+    struct list_head *curr, *next;
+    list_for_each_safe(curr, next, jobqueue->head) {
+        list_remove(curr);
+        target = list_entry(curr, threadtask_t, list);
+        if (target->future->flag & __FUTURE_DESTROYED) {
+            pthread_mutex_unlock(&target->future->mutex);
+            pthread_mutex_destroy(&target->future->mutex);
+            pthread_cond_destroy(&target->future->cond_finished);
+            free(target->future);
         } else {
-            tmp->future->flag |= __FUTURE_CANCELLED;
-            pthread_mutex_unlock(&tmp->future->mutex);
+            target->future->flag |= __FUTURE_CANCELLED;
+            pthread_mutex_unlock(&target->future->mutex);
         }
-        free(tmp);
-        tmp = jobqueue->head;
+        free(target);
     }
-
     pthread_mutex_destroy(&jobqueue->rwlock);
     pthread_cond_destroy(&jobqueue->cond_nonempty);
     free(jobqueue);
@@ -139,38 +146,41 @@ static void __jobqueue_fetch_cleanup(void *arg) // need to be locked
     pthread_mutex_unlock(mutex);
 }
 
+static void *jobqueue_pop(void *queue)
+{
+    jobqueue_t *jobqueue = (jobqueue_t *) queue;
+    struct list_head *target = jobqueue->head->next;
+    list_remove(target);
+    jobqueue->size--;
+    return (void *) target;
+}
+
 static void *jobqueue_fetch(void *queue)
 {
+
     jobqueue_t *jobqueue = (jobqueue_t *) queue;
     threadtask_t *task;
     int old_state;
-
+    
     pthread_cleanup_push(__jobqueue_fetch_cleanup, (void *) &jobqueue->rwlock);
 
     while (1) {
         pthread_mutex_lock(&jobqueue->rwlock);
         pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, &old_state);
         pthread_testcancel();
-
-        while (!jobqueue->tail) 
+        while (list_empty(jobqueue->head)) {// `size` variable replace isEmpty()
             pthread_cond_wait(&jobqueue->cond_nonempty, &jobqueue->rwlock);
-
-        pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &old_state);
-        if (jobqueue->head == jobqueue->tail) {
-            task = jobqueue->tail;
-            jobqueue->head = jobqueue->tail = NULL;
-        } else {
-            threadtask_t *tmp;
-            for (tmp = jobqueue->head; tmp->next != jobqueue->tail;
-                 tmp = tmp->next)
-                ;
-            task = tmp->next;
-            tmp->next = NULL;
-            jobqueue->tail = tmp;
+            printf("wait\n");
         }
+        pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &old_state);
+
+        // pop queue
+        struct list_head *node = (struct list_head *) jobqueue_pop(jobqueue);
+        task = list_entry(node, threadtask_t, list);
+        
         pthread_mutex_unlock(&jobqueue->rwlock);
 
-        if (task->func) { // reduce branch
+        if (task->func) { // reduce branch   
             pthread_mutex_lock(&task->future->mutex);
             if (task->future->flag & __FUTURE_CANCELLED) {
                 pthread_mutex_unlock(&task->future->mutex);
@@ -194,14 +204,18 @@ static void *jobqueue_fetch(void *queue)
                 pthread_cond_broadcast(&task->future->cond_finished);
                 pthread_mutex_unlock(&task->future->mutex);
             }
+            
             free(task);
         } else {
+            
             pthread_mutex_destroy(&task->future->mutex);
             pthread_cond_destroy(&task->future->cond_finished);
+            
             free(task->future);
             free(task);
             break;
         }
+
     }
 
     pthread_cleanup_pop(0);
@@ -247,29 +261,33 @@ struct __tpool_future *tpool_apply(struct __threadpool *pool,
                                    void *(*func)(void *),
                                    void *arg)
 {
+
     jobqueue_t *jobqueue = pool->jobqueue;
-    threadtask_t *new_head = malloc(sizeof(threadtask_t));
+    threadtask_t *new_node = malloc(sizeof(threadtask_t));
     struct __tpool_future *future = tpool_future_create();
-    if (new_head && future) {
-        new_head->func = func, new_head->arg = arg, new_head->future = future;
+    if (new_node && future) {
+        new_node->func = func, new_node->arg = arg, new_node->future = future;
         pthread_mutex_lock(&jobqueue->rwlock);
-        if (jobqueue->head) {
-            new_head->next = jobqueue->head;
-            jobqueue->head = new_head;
-            // pthread_cond_broadcast(&jobqueue->cond_nonempty);
-        } else {
-            jobqueue->head = jobqueue->tail = new_head;
-            pthread_cond_broadcast(&jobqueue->cond_nonempty);
+        switch (jobqueue->size) {
+            case 0:
+                list_add_tail(&new_node->list, jobqueue->head);
+                pthread_cond_broadcast(&jobqueue->cond_nonempty);
+                break;
+            default:
+                list_add_tail(&new_node->list, jobqueue->head);
+                break;    
         }
+        
+        jobqueue->size++;
         pthread_mutex_unlock(&jobqueue->rwlock);
-    } else if (new_head) {
-        free(new_head);
+    } else if (new_node) {
+        free(new_node);
         return NULL;
     } else if (future) {
-        // tpool_future_destroy(future);
-        free(future);
+        tpool_future_destroy(future);
         return NULL;
     }
+    
     return future;
 }
 
@@ -288,3 +306,4 @@ int tpool_join(struct __threadpool *pool)
     free(pool);
     return 0;
 }
+ 

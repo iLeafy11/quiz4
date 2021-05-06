@@ -146,7 +146,6 @@ static void *jobqueue_fetch(void *queue)
     int old_state;
 
     pthread_cleanup_push(__jobqueue_fetch_cleanup, (void *) &jobqueue->rwlock);
-
     while (1) {
         pthread_mutex_lock(&jobqueue->rwlock);
         pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, &old_state);
@@ -177,12 +176,13 @@ static void *jobqueue_fetch(void *queue)
                 free(task);
                 continue;
             } else {
-                task->future->flag |= __FUTURE_RUNNING;
+                //task->future->flag |= __FUTURE_RUNNING;
                 pthread_mutex_unlock(&task->future->mutex);
             }
 
             void *ret_value = task->func(task->arg);
             pthread_mutex_lock(&task->future->mutex);
+
             if (task->future->flag & __FUTURE_DESTROYED) {
                 pthread_mutex_unlock(&task->future->mutex);
                 pthread_mutex_destroy(&task->future->mutex);
@@ -206,7 +206,7 @@ static void *jobqueue_fetch(void *queue)
 
     pthread_cleanup_pop(0);
     return NULL;
-    // pthread_exit(NULL);
+    //pthread_exit(NULL);
 }
 
 struct __threadpool *tpool_create(size_t count)
@@ -223,10 +223,13 @@ struct __threadpool *tpool_create(size_t count)
     pool->count = count, pool->jobqueue = jobqueue;
     if ((pool->workers = malloc(count * sizeof(pthread_t)))) {
         for (int i = 0; i < count; i++) {
+            
             if (pthread_create(&pool->workers[i], NULL, jobqueue_fetch,
                                (void *) jobqueue)) {
+                printf("pthread create failed\n");
                 for (int j = 0; j < i; j++)
                     pthread_cancel(pool->workers[j]);
+                
                 for (int j = 0; j < i; j++)
                     pthread_join(pool->workers[j], NULL);
                 free(pool->workers);
@@ -234,10 +237,12 @@ struct __threadpool *tpool_create(size_t count)
                 free(pool);
                 return NULL;
             }
+            
+            //pthread_create(&pool->workers[i], NULL, jobqueue_fetch, (void *) jobqueue);
         }
         return pool;
     }
-
+    printf("malloc failed\n");
     jobqueue_destroy(jobqueue);
     free(pool);
     return NULL;
@@ -288,3 +293,4 @@ int tpool_join(struct __threadpool *pool)
     free(pool);
     return 0;
 }
+

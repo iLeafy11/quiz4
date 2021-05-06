@@ -7,7 +7,6 @@
 #include "dthread.h"
 
 #define PRECISION 100 /* upper bound in BPP sum */
-
 /* Use Bailey–Borwein–Plouffe formula to approximate PI */
 static void *bbp(void *arg) // mod
 {
@@ -20,6 +19,7 @@ static void *bbp(void *arg) // mod
     return (void *) product;
 }
 
+/*
 static void *test(void *arg)
 {
     sleep(10);
@@ -30,6 +30,7 @@ static void *test(void *arg)
     }
     return (void *) product;
 }
+*/
 
 #include "leibniz.h"
 
@@ -56,5 +57,6 @@ int main()
 
     tpool_join(pool);
     printf("PI calculated with %d terms: %.15f\n", PRECISION + 1, bbp_sum); // mod
+
     return 0;
 }

@@ -47,12 +47,17 @@ int main()
         // futures[i] = tpool_apply(pool, test, (void *) &bbp_args[i]); // test
     }
 
-    for (int i = 0; i <= PRECISION; i++) {
-        double *result = tpool_future_get(futures[i], 0 /* blocking wait */);
+    for (int i = PRECISION; i >= 0; i--) {
+        double *result = tpool_future_get(futures[i], 1 /* blocking wait */);
+        if (!result) {
+            printf("%d\n", i);
+            continue;
+        }
         bbp_sum += *result; // mod
         // printf ("%.15f\n", *result); // test
         tpool_future_destroy(futures[i]);
         free(result);
+        
     }
 
     tpool_join(pool);

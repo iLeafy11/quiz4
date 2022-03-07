@@ -1,8 +1,9 @@
 CC:=gcc -Wall -pthread
-obj:=pi eval
+obj:=pi eval a.out
 
 pi: thread.o main.c
-	$(CC) thread.o main.c -o pi -lm
+	$(CC) -g thread.o main.c -o pi -lm -fsanitize=thread
+	./pi
 
 dthread: dthread.o main.c
 	$(CC) dthread.o main.c -o pi -lm

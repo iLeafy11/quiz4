@@ -15,23 +15,18 @@ enum __future_flags {
     __FUTURE_DESTROYED = 020,
 };
 
-enum __shutdown_flags {
-    __GRACEFUL_SHUTDOWN = 01,
-    __IMMEDIATE_SHUTDOWN = 02,
-};
-
 typedef struct __threadtask {
     void *(*func)(void *);
     void *arg;
     struct __tpool_future *future;
-    struct list_head list; /* a circular doubly linked list structure */
+    void *ring;
 } threadtask_t;
 
 typedef struct __jobqueue {
-    struct list_head head;
     size_t size;
     pthread_cond_t cond_nonempty;
     pthread_mutex_t rwlock;
+    void *ring;
 } jobqueue_t;
 
 struct __tpool_future {
@@ -40,14 +35,8 @@ struct __tpool_future {
     pthread_mutex_t mutex;
     pthread_cond_t cond_finished;
 };
-/*
-struct thread_t {
-    pthread_t id;
-    int shutdown;
-};
-*/
+
 struct __threadpool {
-    int shutdown;
     size_t count;
     pthread_t *workers;
     jobqueue_t *jobqueue;
@@ -63,7 +52,6 @@ static struct __tpool_future *tpool_future_create(void)
         // pthread_cond_init(&future->cond_finished, NULL);
         pthread_condattr_t attr;
         pthread_condattr_init(&attr);
-        pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
         pthread_cond_init(&future->cond_finished, &attr);
         pthread_condattr_destroy(&attr);
     }
@@ -75,14 +63,14 @@ int tpool_future_destroy(struct __tpool_future *future)
     if (future) {
         pthread_mutex_lock(&future->mutex);
         if (future->flag & (__FUTURE_FINISHED | __FUTURE_CANCELLED | __FUTURE_TIMEOUT)) {
-            // printf("future finished, cancelled, timeout should be destroyed.\n");
+            printf("future finished, cancelled, timeout should be destroyed.\n");
             pthread_mutex_unlock(&future->mutex);
             pthread_mutex_destroy(&future->mutex);
             pthread_cond_destroy(&future->cond_finished);
             free(future);
         } else {
             future->flag |= __FUTURE_DESTROYED;
-            // printf("future label destroyed, if future is not finished, cancelled, timeout.\n");
+            printf("future label destroyed, if future is not finished, cancelled, timeout.\n");
             pthread_mutex_unlock(&future->mutex); // will free it when fetching the jobs.
         }
     }
@@ -102,18 +90,16 @@ void *tpool_future_get(struct __tpool_future *future, unsigned int seconds)
             int status = pthread_cond_timedwait(&future->cond_finished,
                                                 &future->mutex, &expire_time);
             if (status == ETIMEDOUT) {
-                printf("TIMEOUT!\n");
                 future->flag |= __FUTURE_TIMEOUT;
                 pthread_mutex_unlock(&future->mutex);
                 return NULL;
-                /* FIXME: The returned NULL pointer will be dereferenced in main.c, which will create segmentation fault. */
             }
         } else {
             pthread_cond_wait(&future->cond_finished, &future->mutex);
-            // printf("wait for getting the future.\n");
+            printf("wait for getting the future.\n");
         }
     }
-    // printf("return the result after getting the future.\n");
+    printf("return the result after getting the future.\n");
     pthread_mutex_unlock(&future->mutex); // allow tpool_future_destroy())
     return future->result;
 }
@@ -123,7 +109,7 @@ static jobqueue_t *jobqueue_create(void)
 {
     jobqueue_t *jobqueue = malloc(sizeof(jobqueue_t));
     if (jobqueue) {
-        INIT_LIST_HEAD(&jobqueue->head);
+        /* TODO: ring buffer */
         jobqueue->size = 0;
         pthread_cond_init(&jobqueue->cond_nonempty, NULL);
         pthread_mutex_init(&jobqueue->rwlock, NULL);
@@ -134,26 +120,10 @@ static jobqueue_t *jobqueue_create(void)
 static void jobqueue_destroy(jobqueue_t *jobqueue) // questionable code
 {
     threadtask_t *tmp;
-    struct list_head *curr, *next;
-    list_for_each_safe(curr, next, &jobqueue->head) {
-        list_remove(curr);
-        tmp = list_entry(curr, threadtask_t, list);
-        pthread_mutex_lock(&tmp->future->mutex);
-        if (tmp->future->flag & __FUTURE_DESTROYED) {
-            // printf("future destroyed. in jobqueue_destroy().\n");
-            pthread_mutex_unlock(&tmp->future->mutex);
-            pthread_mutex_destroy(&tmp->future->mutex);
-            pthread_cond_destroy(&tmp->future->cond_finished);
-            free(tmp->future);
-            continue;
-        } else {
-            // printf("%p ", &tmp->list);
-            tmp->future->flag |= __FUTURE_CANCELLED;
-            // printf("future label cancelled, if the future is not destroyed.\n");
-            pthread_mutex_unlock(&tmp->future->mutex);
-        }
-        free(tmp);
-    }
+    
+    /* ring buffer destroy */
+
+
     pthread_mutex_destroy(&jobqueue->rwlock);
     pthread_cond_destroy(&jobqueue->cond_nonempty);
     free(jobqueue);
@@ -168,8 +138,9 @@ static void __jobqueue_fetch_cleanup(void *arg) /* TODO: is it need to be locked
 static void *jobqueue_pop(void *queue)
 {
     jobqueue_t *jobqueue = (jobqueue_t *) queue;
-    struct list_head *target = jobqueue->head.next;
-    list_remove(target);
+    struct thread_task_t *target;
+    /* ring buffer pop */
+    /* TODO: ring consider the case where the ring buffer is empty */
     jobqueue->size--;
     return (void *) target;
 }
@@ -186,40 +157,34 @@ static void *jobqueue_fetch(void *queue)
         pthread_mutex_lock(&taskqueue->rwlock);
         pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, &old_state);
         pthread_testcancel();
-        while (list_empty(&taskqueue->head)) { /* TODO: what if using jobqueue->size to replace isEmpty() ? */
+        while ( /* buffer empty */ 1) { /* TODO: what if using jobqueue->size to replace isEmpty() ? */
             pthread_cond_wait(&taskqueue->cond_nonempty, &taskqueue->rwlock);
         }
         pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &old_state);
 
         /* pop queue */
-        struct list_head *node = (struct list_head *) jobqueue_pop(taskqueue);
-        task = list_entry(node, threadtask_t, list);
         
         pthread_mutex_unlock(&taskqueue->rwlock);
 
         if (task->func) { /* TODO: reduce branch(?) */
             pthread_mutex_lock(&task->future->mutex);
             if (task->future->flag & __FUTURE_CANCELLED) {
-                // printf("future cancelled, so delete the task.\n");
+                printf("future cancelled, so delete the task.\n");
                 pthread_mutex_unlock(&task->future->mutex);
                 free(task);
                 continue;
             } else {
                 task->future->flag |= __FUTURE_RUNNING;
-                // printf("future running.\n");
+                printf("future running.\n");
                 pthread_mutex_unlock(&task->future->mutex);
             }
-            /*
-            if () {
-                shutdown ...
-            }
-            */
+            
             /* work on task */
             void *ret_value = task->func(task->arg);
             pthread_mutex_lock(&task->future->mutex);
 
             if (task->future->flag & __FUTURE_DESTROYED) {
-                // printf("future destroyed, so delete the future object of the task.\n");
+                printf("future destroyed, so delete the future object of the task.\n");
                 pthread_mutex_unlock(&task->future->mutex);
                 pthread_mutex_destroy(&task->future->mutex);
                 pthread_cond_destroy(&task->future->cond_finished);
@@ -228,7 +193,7 @@ static void *jobqueue_fetch(void *queue)
                 task->future->flag |=  __FUTURE_FINISHED;
                 task->future->result = ret_value;
                 pthread_cond_broadcast(&task->future->cond_finished);
-                // printf("future finished, so the task is finished. broadcast cond_finished.\n");
+                printf("future finished, so the task is finished. broadcast cond_finished.\n");
                 pthread_mutex_unlock(&task->future->mutex);
             }
             
@@ -252,7 +217,7 @@ struct __threadpool *tpool_create(size_t count)
 {
     jobqueue_t *jobqueue = jobqueue_create();
     struct __threadpool *pool = malloc(sizeof(struct __threadpool));
-    // printf("The address of the threadpool: %p\n", pool);
+    printf("The address of the threadpool: %p\n", pool);
     if (!jobqueue || !pool) {
         if (jobqueue)
             jobqueue_destroy(jobqueue);
@@ -300,43 +265,24 @@ struct __tpool_future *tpool_apply(struct __threadpool *pool,
         pthread_mutex_lock(&jobqueue->rwlock);
         switch (jobqueue->size) {
             case 0:
-                list_add_tail(&new_node->list, &jobqueue->head);
+                /* TODO: ring buffer single producer, consider the case of buffer full */
+                /* producer */
                 pthread_cond_broadcast(&jobqueue->cond_nonempty);
-                // printf("After add things to tail, broadcast nonempty\n");
+                printf("After add things to tail, broadcast nonempty\n");
                 break;
             default:
-                list_add_tail(&new_node->list, &jobqueue->head);
+                /* TODO: ring buffer produce */
                 break;    
         }
 
         jobqueue->size++;
         pthread_mutex_unlock(&jobqueue->rwlock);
-    } else if (new_node) {
-        free(new_node);
-        return NULL;
-        /*
-           new_node
-           return new_node;
-           */
-    } else if (future) {
-        tpool_future_destroy(future);
-        return NULL;
-    }
+    } 
     return future;
 }
 
-
-
 int tpool_join(struct __threadpool *pool)
 {
-    if (!pool) {
-        printf("Invalid threadpool\n");
-        return 0;
-    }
-/*
-    pool
-    
-*/
     size_t num_threads = pool->count;
     for (int i = 0; i < num_threads; i++)
         tpool_apply(pool, NULL, NULL);
